@@ -119,8 +119,9 @@ async function run() {
 
     // Get inputs
     const taskDefinitionFile = core.getInput('task-definition', { required: true });
-    const cluster = core.getInput('cluster', { required: false });
+    const service = core.getInput('service', { required: true });
     const count = core.getInput('count', { required: true });
+    const clusterName = core.getInput('cluster', { required: false }) || 'default';
     const startedBy = core.getInput('started-by', { required: false }) || agent;
     const waitForFinish = core.getInput('wait-for-finish', { required: false }) || false;
     let waitForMinutes = parseInt(core.getInput('wait-for-minutes', { required: false })) || 30;
@@ -148,30 +149,64 @@ async function run() {
     const taskDefArn = registerResponse.taskDefinition.taskDefinitionArn;
     core.setOutput('task-definition-arn', taskDefArn);
 
-    const clusterName = cluster ? cluster : 'default';
+    // Fetch the configuration from a service
+    core.debug('Fetch the configuration');
+    let describeResponse;
+    try {
+      describeResponse = await ecs.describeServices({
+        services: [service],
+        cluster: clusterName
+      }).promise();
+    } catch (error) {
+      core.setFailed("Failed to fetch the configuration from a service: " + error.message);
+      throw(error);
+    }
+    const serviceResponse = describeResponse.services[0];
 
     core.debug(`Running task with ${JSON.stringify({
+      count,
+      startedBy,
       cluster: clusterName,
       taskDefinition: taskDefArn,
-      count: count,
-      startedBy: startedBy
+      capacityProviderStrategy: serviceResponse.capacityProviderStrategy,
+      launchType: serviceResponse.launchType,
+      networkConfiguration: serviceResponse.networkConfiguration,
     })}`)
 
-    const runTaskResponse = await ecs.runTask({
-      cluster: clusterName,
-      taskDefinition: taskDefArn,
-      count: count,
-      startedBy: startedBy
-    }).promise();
+    // Starts a new task
+    let taskResponse;
+    try {
+      // const commandList = parseCommand(command);
+      taskResponse = await ecs.runTask({
+        count,
+        startedBy,
+        cluster: clusterName,
+        taskDefinition: taskDefArn,
+        capacityProviderStrategy: serviceResponse.capacityProviderStrategy,
+        launchType: serviceResponse.launchType,
+        networkConfiguration: serviceResponse.networkConfiguration,
+        // overrides: {
+        //   containerOverrides: [
+        //     {
+        //       name: container,
+        //       command: commandList
+        //     }
+        //   ]
+        // }
+      }).promise();
+    } catch (error) {
+      core.setFailed("Failed to start a task in ECS: " + error.message);
+      throw(error);
+    }
 
-    core.debug(`Run task response ${JSON.stringify(runTaskResponse)}`)
+    core.debug(`Run task response ${JSON.stringify(taskResponse)}`)
 
-    if (runTaskResponse.failures && runTaskResponse.failures.length > 0) {
-      const failure = runTaskResponse.failures[0];
+    if (taskResponse.failures && taskResponse.failures.length > 0) {
+      const failure = taskResponse.failures[0];
       throw new Error(`${failure.arn} is ${failure.reason}`);
     }
 
-    const taskArns = runTaskResponse.tasks.map(task => task.taskArn);
+    const taskArns = taskResponse.tasks.map(task => task.taskArn);
 
     core.setOutput('task-arn', taskArns);
 
